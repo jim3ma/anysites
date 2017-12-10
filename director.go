@@ -47,6 +47,9 @@ func NewDirector(target *url.URL, schema, domain, domainPrefifx string, subdomai
 
 func (d *Director) Director(req *http.Request) {
 	log.Printf("request url: %#v", req.URL)
+	log.Printf("request header: %#v", req.Header)
+
+	// TODO some request with header "Range", the response with return with 206, we need cached first to replace url
 
 	if hasSubdomain(req, d.domainPrefix) {
 		d.updateSubRequest(req)
@@ -114,7 +117,13 @@ func (d *Director) ModifyResponse(resp *http.Response) error {
 	// TODO handle Content-Type before pass to ReverseProxy, non "text/html" resource should be bypass, cache and so on.
 	if strings.Contains(strings.Join(ct, "; "), "text/html") {
 		var bodyBytes []byte
-		// log.Printf("CE: %s", resp.Header.Get("Content-Encoding"))
+		log.Printf("Response Header: %s", resp.Header)
+		log.Printf("Content Length: %#v", resp.ContentLength)
+		log.Printf("Status:%#v, Code: %#v", resp.Status, resp.StatusCode)
+
+		if resp.StatusCode == http.StatusPartialContent{
+			return nil
+		}
 		switch resp.Header.Get("Content-Encoding") {
 		// currently, the pure go brotli library didn't support NewWriter method
 		/*
@@ -124,7 +133,10 @@ func (d *Director) ModifyResponse(resp *http.Response) error {
 			resp.Body.Close()
 		*/
 		case "gzip":
-			r, _ := gzip.NewReader(resp.Body)
+			r, err := gzip.NewReader(resp.Body)
+			if err != nil {
+				return err
+			}
 			bodyBytes, _ = ioutil.ReadAll(r)
 			resp.Body.Close()
 		case "deflate":
@@ -147,15 +159,11 @@ func (d *Director) ModifyResponse(resp *http.Response) error {
 		doc.Find("link").Each(d.replaceDomain(resp.Request, "href"))
 
 		/*
-		replace domain in <script src=""></script>, <style src=""></style>
+		replace domain in <script src=""/>, <style src=""/>, <img src="/>
 		 */
-		doc.Find("link").Each(d.replaceDomain(resp.Request, "src"))
+		doc.Find("img").Each(d.replaceDomain(resp.Request, "src"))
+		doc.Find("script").Each(d.replaceDomain(resp.Request, "src"))
 		doc.Find("style").Each(d.replaceDomain(resp.Request, "src"))
-
-		/*
-		replace slash start url with full domain
-		 */
-		doc.Find("a").Each(d.updateSlashStart(resp.Request, "href"))
 
 		// TODO replace url in javascript, css style
 
@@ -207,12 +215,15 @@ func (d *Director) updateHeader(req *http.Request, resp *http.Response) {
 
 }
 
-func (d *Director) updateSlashStart(req *http.Request, attrName string) func(i int, s *goquery.Selection) {
+func (d *Director) replaceDomain(req *http.Request, attrName string) func(i int, s *goquery.Selection) {
 	return func(i int, s *goquery.Selection) {
 		attr, exist := s.Attr(attrName)
 		if !exist {
 			return
 		}
+		log.Printf("replace domain in %s: %#v", attrName, attr)
+
+		// prefix with slash "/", "../"
 		if strings.HasPrefix(attr, "/") && ! strings.HasPrefix(attr, "//") {
 			log.Printf("slash start %s: %#v", attrName, attr)
 			// update target domain
@@ -230,42 +241,72 @@ func (d *Director) updateSlashStart(req *http.Request, attrName string) func(i i
 					break
 				}
 			}
+		} else if strings.HasPrefix(attr, "../") {
+			// TODO
 		}
-	}
-}
-
-func (d *Director) replaceDomain(req *http.Request, attrName string) func(i int, s *goquery.Selection) {
-	return func(i int, s *goquery.Selection) {
-		attr, exist := s.Attr(attrName)
-		if !exist {
-			return
-		}
-		log.Printf("replace domain in %s: %#v", attrName, attr)
 
 		// target host
+		// TODO simplify code
 		if strings.HasPrefix(attr, "https://"+d.target.Host+"/") ||
-			strings.HasPrefix(attr, "http://"+d.target.Host+"/") ||
-			strings.HasPrefix(attr, "//"+d.target.Host) {
+			strings.HasPrefix(attr, "https://"+d.target.Host+"?") ||
+			attr == "https://"+d.target.Host{
+			if d.schema == "https" {
+				s.SetAttr(attrName, strings.Replace(attr, d.target.Host, d.domain, 1))
+			} else {
+				s.SetAttr(attrName, strings.Replace(attr, "https://"+d.target.Host,
+					d.schema+"://"+d.domain+d.domainPrefix+"https/"+d.target.Host, 1))
+			}
+			return
+		} else if strings.HasPrefix(attr, "http://"+d.target.Host+"/") ||
+			strings.HasPrefix(attr, "http://"+d.target.Host+"?") ||
+			attr == "http://"+d.target.Host{
+			if d.schema == "http" {
+				s.SetAttr(attrName, strings.Replace(attr, d.target.Host, d.domain, 1))
+			} else {
+				s.SetAttr(attrName, strings.Replace(attr, "http://"+d.target.Host,
+					d.schema+"://"+d.domain+d.domainPrefix+"http/"+d.target.Host, 1))
+			}
+			return
+		} else if strings.HasPrefix(attr, "//"+d.target.Host+"/") ||
+			strings.HasPrefix(attr, "//"+d.target.Host+"?") ||
+			attr == "//"+d.target.Host+"/"{
 			s.SetAttr(attrName, strings.Replace(attr, d.target.Host, d.domain, 1))
 			return
 		}
 
 		// sub domain
 		for _, domain := range d.subdomains {
-			if strings.HasPrefix(attr, "https://"+domain+"/") {
+			if strings.HasPrefix(attr, "https://"+domain+"/"){
 				s.SetAttr(attrName,
 					strings.Replace(attr, "https://"+domain,
-						d.schema+"://"+d.domain+"/x/https/"+domain, 1))
+						d.schema+"://"+d.domain+d.domainPrefix+"https/"+domain, 1))
 				break
-			} else if strings.HasPrefix(attr, "//"+domain+"/") {
+			} else if strings.HasPrefix(attr, "//"+domain+"/"){
 				s.SetAttr(attrName,
 					strings.Replace(attr, "//"+domain,
-						d.schema+"://"+d.domain+"/x/"+req.URL.Scheme+"/"+domain, 1))
+						d.schema+"://"+d.domain+d.domainPrefix+req.URL.Scheme+"/"+domain, 1))
 				break
-			} else if strings.HasPrefix(attr, "http://"+domain+"/") {
+			} else if strings.HasPrefix(attr, "http://"+domain+"/"){
 				s.SetAttr(attrName,
 					strings.Replace(attr, "http://"+domain,
-						d.schema+"://"+d.domain+"/x/http/"+domain, 1))
+						d.schema+"://"+d.domain+d.domainPrefix+"http/"+domain, 1))
+				break
+			}
+
+			if strings.HasPrefix(attr, "https://"+domain+"?"){
+				s.SetAttr(attrName,
+					strings.Replace(attr, "https://"+domain+"?",
+						d.schema+"://"+d.domain+d.domainPrefix+"https/"+domain+"?", 1))
+				break
+			} else if strings.HasPrefix(attr, "//"+domain+"?"){
+				s.SetAttr(attrName,
+					strings.Replace(attr, "//"+domain+"?",
+						d.schema+"://"+d.domain+d.domainPrefix+req.URL.Scheme+"/"+domain+"?", 1))
+				break
+			} else if strings.HasPrefix(attr, "http://"+domain+"?"){
+				s.SetAttr(attrName,
+					strings.Replace(attr, "http://"+domain+"?",
+						d.schema+"://"+d.domain+d.domainPrefix+"http/"+domain+"?", 1))
 				break
 			}
 		}
