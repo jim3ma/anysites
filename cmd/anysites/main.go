@@ -36,6 +36,7 @@ func main() {
 			"ipv4.google.com",
 			"keep.google.com",
 			"mail.google.com",
+			"maps.google.com",
 			"myaccount.google.com",
 			"news.google.com",
 			"notifications.google.com",
@@ -48,6 +49,10 @@ func main() {
 			"support.google.com",
 			"translate.google.com",
 			"url.google.com",
+			"www.google.com",
+
+			"google.com.hk",
+			"www.google.com.hk",
 
 			"fonts.gstatic.com",
 			"www.gstatic.com",
