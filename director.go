@@ -46,11 +46,12 @@ func NewDirector(target *url.URL, schema, domain, domainPrefifx string, subdomai
 }
 
 func (d *Director) Director(req *http.Request) {
-	log.Printf("request url: %#v", req.URL)
-	log.Printf("request header: %#v", req.Header)
+	log.Printf("Request url: %#v", req.URL)
+	log.Printf("Request header: %#v", req.Header)
 
 	// TODO some request with header "Range", the response with return with 206, we need cached first to replace url
 
+	d.updateReferer(req)
 	if hasSubdomain(req, d.domainPrefix) {
 		d.updateSubRequest(req)
 	} else {
@@ -92,6 +93,36 @@ func (d *Director) updateSubRequest(req *http.Request) error {
 	return nil
 }
 
+func (d *Director) updateReferer(req *http.Request) {
+	re := req.Header.Get("Referer")
+	if re != "" {
+		var newRe string
+		reUrl, err := url.Parse(re)
+		if err != nil {
+			log.Printf("Parse Referer failed: %s", err)
+		}
+		log.Printf("Origin Referer: %s", re)
+		if strings.HasPrefix(reUrl.Path, d.domainPrefix) {
+			u := strings.Split(reUrl.Path, "/")
+			log.Printf("url: %#v", u)
+			if len(u) < 4 {
+				log.Printf("Parse Referer failed: too short path")
+				return
+			}
+			reUrl.Path = "/" + strings.Join(u[4:], "/")
+			reUrl.Host = u[3]
+			reUrl.Scheme = u[2]
+			newRe = reUrl.Scheme + "://" + reUrl.Host + reUrl.Path + reUrl.RawQuery
+		} else if reUrl.Host == d.domain {
+			newRe = strings.Replace(re, reUrl.Scheme + "://" + reUrl.Host, d.target.Scheme + "://" + d.target.Host, 1)
+		} else {
+			return
+		}
+		log.Printf("New Referer: %s", newRe)
+		req.Header.Set("Referer", newRe)
+	}
+}
+
 func (d *Director) updateTargetRequest(req *http.Request) {
 	req.URL.Scheme = d.target.Scheme
 	req.URL.Host = d.target.Host
@@ -109,9 +140,11 @@ func (d *Director) ModifyResponse(resp *http.Response) error {
 	// update Location for Status 30x
 	if resp.StatusCode > 299 && resp.StatusCode < 400 {
 		loc := resp.Header.Get("Location")
-		newLoc := d.decorateUrl(resp.Request, loc)
-		log.Printf("location: %#v, new: %#v", loc, newLoc)
-		resp.Header.Set("Location", newLoc)
+		if loc != "" {
+			newLoc := d.decorateUrl(resp.Request, loc)
+			log.Printf("location: %#v, new: %#v", loc, newLoc)
+			resp.Header.Set("Location", newLoc)
+		}
 	}
 
 	ct, ok := resp.Header["Content-Type"]
@@ -302,4 +335,8 @@ func (d *Director) replaceDomain(req *http.Request, attrName string) func(i int,
 
 		s.SetAttr(attrName, newAttr)
 	}
+}
+
+func (d *Director) replaceCookieDomain(){
+
 }
